@@ -172,7 +172,7 @@ pub async fn handle_client(stream: TcpStream, peer: std::net::SocketAddr, config
         };
         info!("[{}] {} → TCP fallback {}:443", label, reason, fallback);
         bridge_tcp(
-            &label, reader, writer, &fallback, &relay_init, ciphers,
+            &label, reader, writer, &fallback, &relay_init, ciphers, dc_id, is_media,
         )
         .await;
         return;
@@ -226,7 +226,7 @@ pub async fn handle_client(stream: TcpStream, peer: std::net::SocketAddr, config
                     .unwrap_or(target_ip.clone());
                 info!("[{}] DC{}{} → TCP fallback {}:443", label, dc_id, media_tag, fallback);
                 bridge_tcp(
-                    &label, reader, writer, &fallback, &relay_init, ciphers,
+                    &label, reader, writer, &fallback, &relay_init, ciphers, dc_id, is_media,
                 )
                 .await;
                 return;
@@ -348,6 +348,8 @@ async fn bridge_ws(
 // ─── TCP fallback bridge ─────────────────────────────────────────────────────
 
 /// Connect directly to `dst:443` and bridge the re-encrypted streams.
+///
+/// Logs a session-close line on return (matching the `bridge_ws` format).
 async fn bridge_tcp(
     label: &str,
     mut reader: tokio::io::ReadHalf<TcpStream>,
@@ -355,6 +357,8 @@ async fn bridge_tcp(
     dst: &str,
     relay_init: &[u8; 64],
     ciphers: crate::crypto::ConnectionCiphers,
+    dc: u32,
+    is_media: bool,
 ) {
     let remote = match tokio::time::timeout(
         Duration::from_secs(10),
@@ -383,10 +387,13 @@ async fn bridge_tcp(
 
     let crate::crypto::ConnectionCiphers { mut clt_dec, mut clt_enc, mut tg_enc, mut tg_dec } = ciphers;
 
-    tokio::join!(
+    let start = std::time::Instant::now();
+
+    let (bytes_up, bytes_down) = tokio::join!(
         // ── Client → Telegram ─────────────────────────────────────────
         async {
             let mut buf = vec![0u8; 65536];
+            let mut total = 0u64;
             loop {
                 let n = match reader.read(&mut buf).await {
                     Ok(0) | Err(_) => break,
@@ -398,11 +405,14 @@ async fn bridge_tcp(
                 if rem_writer.write_all(chunk).await.is_err() {
                     break;
                 }
+                total += n as u64;
             }
+            total
         },
         // ── Telegram → Client ─────────────────────────────────────────
         async {
             let mut buf = vec![0u8; 65536];
+            let mut total = 0u64;
             loop {
                 let n = match rem_reader.read(&mut buf).await {
                     Ok(0) | Err(_) => break,
@@ -414,8 +424,17 @@ async fn bridge_tcp(
                 if writer.write_all(chunk).await.is_err() {
                     break;
                 }
+                total += n as u64;
             }
+            total
         }
+    );
+
+    let elapsed = start.elapsed().as_secs_f32();
+    info!(
+        "[{}] DC{}{} TCP session closed: ↑{}  ↓{}  {:.1}s",
+        label, dc, if is_media { "m" } else { "" },
+        human_bytes(bytes_up), human_bytes(bytes_down), elapsed
     );
 }
 

@@ -85,9 +85,14 @@ pub struct Config {
     pub pool_size: usize,
 
     /// Maximum number of concurrent client connections.
-    /// Limits file-descriptor consumption and prevents EMFILE errors under load.
-    #[arg(long = "max-connections", default_value = "200", env = "TG_MAX_CONNECTIONS")]
-    pub max_connections: usize,
+    /// When omitted, a safe value is computed automatically from the process's
+    /// soft file-descriptor limit (ulimit -n):
+    ///   max_connections = (fd_limit - reserved_fds) / 2
+    /// where reserved_fds covers the pool, the listener socket, and runtime
+    /// overhead.  Set this explicitly only if you need to override the
+    /// auto-computed limit.
+    #[arg(long = "max-connections", env = "TG_MAX_CONNECTIONS")]
+    pub max_connections: Option<usize>,
 
     /// Enable verbose (DEBUG) logging.
     #[arg(short, long, env = "TG_VERBOSE")]

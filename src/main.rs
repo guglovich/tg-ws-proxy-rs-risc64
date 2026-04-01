@@ -21,6 +21,52 @@ use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 use tracing::{error, info, warn};
 
+// ── File-descriptor budget helpers ───────────────────────────────────────────
+
+/// Read the soft per-process open-file limit from `/proc/self/limits` (Linux).
+/// Falls back to 1 024 on other platforms or when the file cannot be parsed.
+fn soft_nofile_limit() -> usize {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(content) = std::fs::read_to_string("/proc/self/limits") {
+            for line in content.lines() {
+                // Example line:
+                //   Max open files            1024                 4096                 files
+                if line.starts_with("Max open files") {
+                    if let Some(soft_str) = line.split_whitespace().nth(3) {
+                        if soft_str == "unlimited" {
+                            return usize::MAX;
+                        }
+                        if let Ok(n) = soft_str.parse::<usize>() {
+                            return n;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    1024 // conservative fallback for non-Linux or parse failures
+}
+
+/// Compute a safe default for the maximum number of concurrent connections
+/// given the system FD limit and pool configuration.
+///
+/// FD budget:
+///   1 (listener) + pool_size × dc_buckets × 2 (idle + one refill per bucket)
+///   + 32 (Tokio runtime, stdio, safety margin)
+///   + max_connections × 2 (one client socket + one outbound socket per conn)
+///
+/// Rearranging for max_connections:
+///   max_connections = (fd_limit − reserved) / 2
+fn auto_max_connections(fd_limit: usize, pool_size: usize, dc_buckets: usize) -> usize {
+    if fd_limit == usize::MAX {
+        // Unlimited FDs: cap at a large but sane value.
+        return 512;
+    }
+    let reserved = 1 + pool_size * dc_buckets * 2 + 32;
+    (fd_limit.saturating_sub(reserved) / 2).max(4)
+}
+
 mod config;
 mod crypto;
 mod pool;
@@ -57,9 +103,33 @@ async fn main() {
         .await
         .unwrap_or_else(|e| panic!("cannot bind {}: {}", addr, e));
 
+    // ── FD budget & effective max_connections ────────────────────────────
+    // Each active connection uses 2 FDs: the accepted client socket and the
+    // outbound connection to Telegram (WS or TCP fallback).  The pool adds
+    // pool_size × dc_buckets × 2 FDs (idle + one in-flight refill per bucket).
+    // Auto-compute a safe default when the user has not set --max-connections,
+    // so the proxy stays within the process's soft file-descriptor limit.
+    let fd_limit = soft_nofile_limit();
+    let dc_redirects = config.dc_redirects();
+    let dc_buckets = dc_redirects.len() * 2; // non-media + media per DC
+    let max_connections = match config.max_connections {
+        Some(n) => {
+            let safe = auto_max_connections(fd_limit, config.pool_size, dc_buckets);
+            if n > safe {
+                warn!(
+                    "max-connections={} may exceed the safe limit for this system's \
+                     FD budget (fd-limit={}, recommended ≤{}). \
+                     Consider raising `ulimit -n` or reducing --max-connections.",
+                    n, fd_limit, safe
+                );
+            }
+            n
+        }
+        None => auto_max_connections(fd_limit, config.pool_size, dc_buckets),
+    };
+
     // ── Print startup banner ──────────────────────────────────────────────
     let secret = config.secret.as_deref().unwrap_or("");
-    let dc_redirects = config.dc_redirects();
 
     let link_host = &config.host;
     let tg_link = format!(
@@ -80,7 +150,7 @@ async fn main() {
     if config.skip_tls_verify {
         info!("  ⚠  TLS certificate verification DISABLED");
     }
-    info!("  Max connections: {}", config.max_connections);
+    info!("  Max connections: {} (fd-limit: {})", max_connections, fd_limit);
     info!("{}", "=".repeat(60));
     info!("  Telegram proxy link:");
     info!("    {}", tg_link);
@@ -103,7 +173,7 @@ async fn main() {
     // connections can be open simultaneously.
     const EMFILE: i32 = 24; // too many open files (per-process fd limit)
     const ENFILE: i32 = 23; // file table overflow (system-wide fd limit)
-    let semaphore = Arc::new(Semaphore::new(config.max_connections));
+    let semaphore = Arc::new(Semaphore::new(max_connections));
     loop {
         // Block here when we are already at the connection limit.  Pending
         // TCP connections queue in the kernel backlog until capacity frees up.
