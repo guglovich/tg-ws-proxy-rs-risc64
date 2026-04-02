@@ -137,7 +137,7 @@ async fn main() {
     // ── Print startup banner ──────────────────────────────────────────────
     let secret = config.secret.as_deref().unwrap_or("");
 
-    let link_host = &config.host;
+    let link_host = config.link_host();
     let tg_link = format!(
         "tg://proxy?server={}&port={}&secret=dd{}",
         link_host, config.port, secret
@@ -158,8 +158,22 @@ async fn main() {
     }
     info!("  Max connections: {} (fd-limit: {})", max_connections, fd_limit);
     info!("{}", "=".repeat(60));
-    info!("  Telegram proxy link:");
+    info!("  Telegram proxy link (use this on all devices):");
     info!("    {}", tg_link);
+    if link_host != config.host {
+        info!(
+            "  ℹ  Link uses auto-detected IP {}. \
+             Use --link-ip <IP> to override.",
+            link_host
+        );
+    } else if matches!(config.host.as_str(), "127.0.0.1" | "::1") {
+        warn!(
+            "  ⚠  Link shows {} — only the local machine can use this link. \
+             Run with --host 0.0.0.0 (or --link-ip <router-LAN-IP>) \
+             so other devices on the network can connect.",
+            config.host
+        );
+    }
     info!("{}", "=".repeat(60));
 
     // ── Connection pool warm-up ───────────────────────────────────────────

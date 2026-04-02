@@ -92,6 +92,7 @@ tg-ws-proxy [OPTIONS]
 |---|---|---|
 | `--port <PORT>` | `1443` | Listen port |
 | `--host <HOST>` | `127.0.0.1` | Listen address |
+| `--link-ip <IP>` | auto-detected | IP shown in the `tg://` link (see [Router deployment](#router-deployment)) |
 | `--secret <HEX>` | random | 32 hex-char MTProto secret |
 | `--dc-ip <DC:IP>` | DC2 + DC4 | Target IP per DC (repeatable) |
 | `--buf-kb <KB>` | `256` | Socket buffer size |
@@ -101,7 +102,8 @@ tg-ws-proxy [OPTIONS]
 | `--danger-accept-invalid-certs` | off | Skip TLS verification |
 
 Every flag has a matching environment variable (`TG_PORT`, `TG_HOST`,
-`TG_SECRET`, `TG_BUF_KB`, `TG_POOL_SIZE`, `TG_QUIET`, `TG_VERBOSE`, `TG_SKIP_TLS_VERIFY`).
+`TG_SECRET`, `TG_BUF_KB`, `TG_POOL_SIZE`, `TG_QUIET`, `TG_VERBOSE`,
+`TG_SKIP_TLS_VERIFY`, `TG_LINK_IP`).
 
 ### Examples
 
@@ -112,6 +114,9 @@ tg-ws-proxy
 # Custom port and extra DCs
 tg-ws-proxy --port 9050 --dc-ip 1:149.154.175.205 --dc-ip 2:149.154.167.220
 
+# Router deployment: listen on all interfaces, let all LAN devices use the proxy
+tg-ws-proxy --host 0.0.0.0
+
 # Verbose logging
 tg-ws-proxy -v
 
@@ -121,6 +126,29 @@ TG_PORT=1443 TG_SECRET=deadbeef... tg-ws-proxy
 
 On startup the proxy prints a `tg://proxy?...` link you can paste into
 Telegram Desktop to configure it automatically.
+
+### Router deployment
+
+Run the proxy on your router with `--host 0.0.0.0` so it accepts connections
+from all LAN devices:
+
+```bash
+tg-ws-proxy --host 0.0.0.0 --port 1443
+```
+
+When `--host 0.0.0.0` is used, the proxy **auto-detects** the router's LAN IP
+address and uses it in the generated `tg://` link, so you can share the same
+link with every device on your network.
+
+If auto-detection picks the wrong interface, override it explicitly:
+
+```bash
+tg-ws-proxy --host 0.0.0.0 --link-ip 192.168.1.1
+```
+
+> **Note:** The default `--host 127.0.0.1` only accepts connections from the
+> machine running the proxy. Other devices on the network will not be able to
+> connect unless you change this to `0.0.0.0` (or the router's LAN IP).
 
 ## Telegram Desktop Setup
 

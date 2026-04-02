@@ -32,35 +32,29 @@ use crate::pool::WsPool;
 use crate::splitter::MsgSplitter;
 use crate::ws_client::{connect_ws_for_dc, ws_send, TgWsStream};
 
-// WS failure cooldown and blacklist are global for the process lifetime.
-use std::collections::HashSet;
+// WS failure cooldown is global for the process lifetime.
+use std::collections::HashMap;
 use std::sync::Mutex as StdMutex;
 use std::time::Instant;
-use std::collections::HashMap;
 
 // ─── Global failure tracking ─────────────────────────────────────────────────
 
-/// DCs for which WebSocket is permanently blacklisted (all domains 302).
-static WS_BLACKLIST: StdMutex<Option<HashSet<(u32, bool)>>> = StdMutex::new(None);
-
 /// Per-DC cooldown: avoid retrying WS until this instant.
+/// Also used for the "all redirects" case (longer cooldown of 5 min).
 static DC_FAIL_UNTIL: StdMutex<Option<HashMap<(u32, bool), Instant>>> = StdMutex::new(None);
 
 const WS_FAIL_COOLDOWN: Duration = Duration::from_secs(30);
+const WS_REDIRECT_COOLDOWN: Duration = Duration::from_secs(300); // 5 min for "all redirects"
 const WS_FAIL_TIMEOUT: Duration = Duration::from_secs(2);
 const WS_NORMAL_TIMEOUT: Duration = Duration::from_secs(10);
 
-fn is_ws_blacklisted(dc: u32, is_media: bool) -> bool {
-    let lock = WS_BLACKLIST.lock().unwrap();
-    lock.as_ref()
-        .map(|s| s.contains(&(dc, is_media)))
-        .unwrap_or(false)
-}
-
 fn blacklist_ws(dc: u32, is_media: bool) {
-    let mut lock = WS_BLACKLIST.lock().unwrap();
-    lock.get_or_insert_with(HashSet::new)
-        .insert((dc, is_media));
+    // Instead of a permanent blacklist, apply a long cooldown so the proxy
+    // can recover automatically if WS becomes available again (e.g. after a
+    // network change or Telegram-side redirect policy change).
+    let mut lock = DC_FAIL_UNTIL.lock().unwrap();
+    lock.get_or_insert_with(HashMap::new)
+        .insert((dc, is_media), Instant::now() + WS_REDIRECT_COOLDOWN);
 }
 
 fn set_dc_cooldown(dc: u32, is_media: bool) {
@@ -156,14 +150,10 @@ pub async fn handle_client(stream: TcpStream, peer: std::net::SocketAddr, config
     let target_ip = dc_redirects.get(&dc_id).cloned();
     let media_tag = if is_media { "m" } else { "" };
 
-    if target_ip.is_none() || is_ws_blacklisted(dc_id, is_media) {
-        // DC not in config, or WS permanently blacklisted for this DC.
-        let reason = if target_ip.is_none() {
-            format!("DC{} not in --dc-ip config", dc_id)
-        } else {
-            format!("DC{}{} WS blacklisted", dc_id, media_tag)
-        };
-        let fallback = match target_ip.as_ref().or_else(|| dc_fallback_ips.get(&dc_id)) {
+    if target_ip.is_none() {
+        // DC not in config — fall back to TCP using default IP.
+        let reason = format!("DC{} not in --dc-ip config", dc_id);
+        let fallback = match dc_fallback_ips.get(&dc_id) {
             Some(ip) => ip.clone(),
             None => {
                 warn!("[{}] {} — no fallback IP available", label, reason);
@@ -204,12 +194,13 @@ pub async fn handle_client(stream: TcpStream, peer: std::net::SocketAddr, config
                 ws
             }
             None => {
-                // WS failed — apply blacklist or cooldown and fall back to TCP.
+                // WS failed — apply cooldown and fall back to TCP.
                 if all_redirects {
                     blacklist_ws(dc_id, is_media);
                     warn!(
-                        "[{}] DC{}{} blacklisted (all domains returned redirect)",
-                        label, dc_id, media_tag
+                        "[{}] DC{}{} WS cooldown {}s (all domains returned redirect)",
+                        label, dc_id, media_tag,
+                        WS_REDIRECT_COOLDOWN.as_secs()
                     );
                 } else {
                     set_dc_cooldown(dc_id, is_media);
@@ -275,67 +266,88 @@ async fn bridge_ws(
 
     let start = std::time::Instant::now();
 
-    let (bytes_up, bytes_down) = tokio::join!(
-        // ── TCP → WebSocket (client data → Telegram) ──────────────────
-        {
-            let mut splitter = splitter;
-            async move {
-                let mut reader = reader;
-                let mut buf = vec![0u8; 65536];
-                let mut total = 0u64;
-                loop {
-                    let n = match reader.read(&mut buf).await {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => n,
-                    };
-                    let chunk = &mut buf[..n];
-                    // Decrypt from client, then re-encrypt for Telegram.
-                    clt_dec.apply_keystream(chunk);
-                    tg_enc.apply_keystream(chunk);
-                    // Split into MTProto packets and send as separate WS frames.
-                    let parts = splitter.split(chunk);
-                    for part in parts {
-                        if ws_sink.send(Message::Binary(part)).await.is_err() {
-                            return total;
-                        }
-                    }
-                    total += n as u64;
-                }
-                // Flush any partial last packet.
-                for part in splitter.flush() {
-                    let _ = ws_sink.send(Message::Binary(part)).await;
-                }
-                // Close the WS sink so Telegram knows we are done and the
-                // download direction (ws_source) receives the close frame and
-                // terminates promptly instead of waiting indefinitely.
-                let _ = ws_sink.close().await;
-                total
-            }
-        },
-        // ── WebSocket → TCP (Telegram data → client) ──────────────────
+    // Spawn each bridge direction as an independent task so that when one
+    // side closes (e.g. Telegram drops the WS after an idle timeout), the
+    // other side is aborted immediately rather than hanging on blocked I/O
+    // until the OS-level connection eventually times out.  With tokio::join!
+    // both halves had to complete before the function returned, causing
+    // zombie connections that exhausted the process file-descriptor limit.
+
+    let mut upload = tokio::spawn({
+        let mut splitter = splitter;
         async move {
-            let mut writer = writer;
+            let mut reader = reader;
+            let mut buf = vec![0u8; 65536];
             let mut total = 0u64;
             loop {
-                // Use the source half of the split WS stream.
-                let data = match ws_source.next().await {
-                    Some(Ok(Message::Binary(b))) => b,
-                    Some(Ok(Message::Text(t))) => t.into_bytes(),
-                    Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => continue,
-                    _ => break,
+                let n = match reader.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => n,
                 };
-                let mut data = data;
-                // Decrypt from Telegram, then re-encrypt for client.
-                tg_dec.apply_keystream(&mut data);
-                clt_enc.apply_keystream(&mut data);
-                if writer.write_all(&data).await.is_err() {
-                    break;
+                let chunk = &mut buf[..n];
+                // Decrypt from client, then re-encrypt for Telegram.
+                clt_dec.apply_keystream(chunk);
+                tg_enc.apply_keystream(chunk);
+                // Split into MTProto packets and send as separate WS frames.
+                let parts = splitter.split(chunk);
+                for part in parts {
+                    if ws_sink.send(Message::Binary(part)).await.is_err() {
+                        return total;
+                    }
                 }
-                total += data.len() as u64;
+                total += n as u64;
             }
+            // Flush any partial last packet.
+            for part in splitter.flush() {
+                let _ = ws_sink.send(Message::Binary(part)).await;
+            }
+            // Close the WS sink so Telegram knows we are done and the
+            // download direction (ws_source) receives the close frame and
+            // terminates promptly instead of waiting indefinitely.
+            let _ = ws_sink.close().await;
             total
         }
-    );
+    });
+
+    let mut download = tokio::spawn(async move {
+        let mut writer = writer;
+        let mut total = 0u64;
+        loop {
+            // Use the source half of the split WS stream.
+            let data = match ws_source.next().await {
+                Some(Ok(Message::Binary(b))) => b,
+                Some(Ok(Message::Text(t))) => t.into_bytes(),
+                Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => continue,
+                _ => break,
+            };
+            let mut data = data;
+            // Decrypt from Telegram, then re-encrypt for client.
+            tg_dec.apply_keystream(&mut data);
+            clt_enc.apply_keystream(&mut data);
+            if writer.write_all(&data).await.is_err() {
+                break;
+            }
+            total += data.len() as u64;
+        }
+        total
+    });
+
+    // Wait for whichever direction finishes first, then abort the other so
+    // its I/O handles (and file descriptors) are released immediately.
+    let (bytes_up, bytes_down) = tokio::select! {
+        result = &mut upload => {
+            let up = result.unwrap_or_else(|_| 0);
+            download.abort();
+            let down = download.await.unwrap_or_else(|_| 0);
+            (up, down)
+        }
+        result = &mut download => {
+            let down = result.unwrap_or_else(|_| 0);
+            upload.abort();
+            let up = upload.await.unwrap_or_else(|_| 0);
+            (up, down)
+        }
+    };
 
     let elapsed = start.elapsed().as_secs_f32();
     info!(
@@ -389,46 +401,60 @@ async fn bridge_tcp(
 
     let start = std::time::Instant::now();
 
-    let (bytes_up, bytes_down) = tokio::join!(
-        // ── Client → Telegram ─────────────────────────────────────────
-        async {
-            let mut buf = vec![0u8; 65536];
-            let mut total = 0u64;
-            loop {
-                let n = match reader.read(&mut buf).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => n,
-                };
-                let chunk = &mut buf[..n];
-                clt_dec.apply_keystream(chunk);
-                tg_enc.apply_keystream(chunk);
-                if rem_writer.write_all(chunk).await.is_err() {
-                    break;
-                }
-                total += n as u64;
+    let mut upload = tokio::spawn(async move {
+        let mut buf = vec![0u8; 65536];
+        let mut total = 0u64;
+        loop {
+            let n = match reader.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => n,
+            };
+            let chunk = &mut buf[..n];
+            clt_dec.apply_keystream(chunk);
+            tg_enc.apply_keystream(chunk);
+            if rem_writer.write_all(chunk).await.is_err() {
+                break;
             }
-            total
-        },
-        // ── Telegram → Client ─────────────────────────────────────────
-        async {
-            let mut buf = vec![0u8; 65536];
-            let mut total = 0u64;
-            loop {
-                let n = match rem_reader.read(&mut buf).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => n,
-                };
-                let chunk = &mut buf[..n];
-                tg_dec.apply_keystream(chunk);
-                clt_enc.apply_keystream(chunk);
-                if writer.write_all(chunk).await.is_err() {
-                    break;
-                }
-                total += n as u64;
-            }
-            total
+            total += n as u64;
         }
-    );
+        total
+    });
+
+    let mut download = tokio::spawn(async move {
+        let mut buf = vec![0u8; 65536];
+        let mut total = 0u64;
+        loop {
+            let n = match rem_reader.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => n,
+            };
+            let chunk = &mut buf[..n];
+            tg_dec.apply_keystream(chunk);
+            clt_enc.apply_keystream(chunk);
+            if writer.write_all(chunk).await.is_err() {
+                break;
+            }
+            total += n as u64;
+        }
+        total
+    });
+
+    // Same cross-direction cancellation as bridge_ws: abort the peer task
+    // when one direction closes so FDs are freed immediately.
+    let (bytes_up, bytes_down) = tokio::select! {
+        result = &mut upload => {
+            let up = result.unwrap_or_else(|_| 0);
+            download.abort();
+            let down = download.await.unwrap_or_else(|_| 0);
+            (up, down)
+        }
+        result = &mut download => {
+            let down = result.unwrap_or_else(|_| 0);
+            upload.abort();
+            let up = upload.await.unwrap_or_else(|_| 0);
+            (up, down)
+        }
+    };
 
     let elapsed = start.elapsed().as_secs_f32();
     info!(

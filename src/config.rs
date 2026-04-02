@@ -108,6 +108,14 @@ pub struct Config {
     /// Overrides `--verbose` when both are set.
     #[arg(short = 'q', long, env = "TG_QUIET")]
     pub quiet: bool,
+
+    /// IP address to advertise in the generated `tg://proxy` link.
+    /// Useful when the proxy listens on `0.0.0.0` or `127.0.0.1` but clients
+    /// need to connect via a specific LAN or public IP.
+    /// When omitted, the proxy attempts to auto-detect a non-loopback local IP;
+    /// if that fails it falls back to `--host`.
+    #[arg(long = "link-ip", env = "TG_LINK_IP")]
+    pub link_ip: Option<String>,
 }
 
 impl Config {
@@ -142,9 +150,61 @@ impl Config {
         self.dc_ip.iter().cloned().collect()
     }
 
+    /// The hostname/IP to advertise in the generated `tg://proxy` link.
+    ///
+    /// Resolution order:
+    /// 1. `--link-ip` if explicitly set.
+    /// 2. Auto-detected first non-loopback IPv4 address when `--host` is a
+    ///    wildcard (`0.0.0.0`) or loopback (`127.0.0.1` / `::1`).
+    /// 3. `--host` verbatim as the final fallback.
+    pub fn link_host(&self) -> String {
+        if let Some(ref ip) = self.link_ip {
+            return ip.clone();
+        }
+        // Auto-detect when the bind address is not directly reachable by
+        // remote clients (wildcard or loopback).
+        let bind_is_local = matches!(
+            self.host.as_str(),
+            "0.0.0.0" | "::" | "127.0.0.1" | "::1"
+        );
+        if bind_is_local {
+            if let Some(lan_ip) = detect_lan_ip() {
+                return lan_ip;
+            }
+        }
+        self.host.clone()
+    }
+
     /// Socket buffer size in bytes.
     #[allow(dead_code)]
     pub fn buf_bytes(&self) -> usize {
         self.buf_kb * 1024
     }
+}
+
+// ─── LAN IP auto-detection ────────────────────────────────────────────────────
+
+/// Return the first non-loopback, non-link-local IPv4 address found on the
+/// system's network interfaces.  Used to generate a usable `tg://` proxy link
+/// when the proxy is bound to a wildcard or loopback address.
+///
+/// Works by opening a UDP socket and "connecting" it to a public IP (no
+/// packet is actually sent); the OS routing table then fills in the local
+/// source address.
+fn detect_lan_ip() -> Option<String> {
+    use std::net::UdpSocket;
+    // 8.8.8.8:80 is Google's public DNS. No packet is actually sent — we just
+    // need any well-known routable address so the kernel can select the right
+    // source interface for us via the routing table.
+    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("8.8.8.8:80").ok()?;
+    let local_addr = socket.local_addr().ok()?;
+    let ip = local_addr.ip();
+    // Only return a usable unicast IPv4 address.
+    if let std::net::IpAddr::V4(v4) = ip {
+        if !v4.is_loopback() && !v4.is_link_local() && !v4.is_unspecified() {
+            return Some(v4.to_string());
+        }
+    }
+    None
 }
