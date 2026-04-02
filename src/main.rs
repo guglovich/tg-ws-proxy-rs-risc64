@@ -45,6 +45,7 @@ fn soft_nofile_limit() -> usize {
             }
         }
     }
+
     1024 // conservative fallback for non-Linux or parse failures
 }
 
