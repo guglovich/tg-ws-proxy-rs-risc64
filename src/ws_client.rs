@@ -27,6 +27,8 @@ use tokio_tungstenite::{
     Connector, MaybeTlsStream, WebSocketStream,
 };
 use tracing::{debug, warn};
+use tungstenite::Error as WsError;
+use tungstenite::Message;
 
 /// A live WebSocket connection to a Telegram DC.
 pub type TgWsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
@@ -73,12 +75,7 @@ pub async fn connect_ws(
     timeout: Duration,
 ) -> WsConnectResult {
     // ── TCP connection to the configured IP ──────────────────────────────
-    let tcp = match tokio::time::timeout(
-        timeout,
-        TcpStream::connect(format!("{}:443", ip)),
-    )
-    .await
-    {
+    let tcp = match tokio::time::timeout(timeout, TcpStream::connect(format!("{}:443", ip))).await {
         Ok(Ok(s)) => s,
         Ok(Err(e)) => return WsConnectResult::Failed(format!("TCP connect: {}", e)),
         Err(_) => return WsConnectResult::Failed("TCP connect timed out".into()),
@@ -95,10 +92,8 @@ pub async fn connect_ws(
     };
     {
         let h = request.headers_mut();
-        h.insert(
-            "Sec-WebSocket-Protocol",
-            HeaderValue::from_static("binary"),
-        );
+
+        h.insert("Sec-WebSocket-Protocol", HeaderValue::from_static("binary"));
         h.insert(
             "Origin",
             HeaderValue::from_static("https://web.telegram.org"),
@@ -126,6 +121,7 @@ pub async fn connect_ws(
     match result {
         Ok(Ok((ws, response))) => {
             let status = response.status().as_u16();
+
             if status == 101 {
                 WsConnectResult::Connected(ws)
             } else if matches!(status, 301 | 302 | 303 | 307 | 308) {
@@ -138,12 +134,12 @@ pub async fn connect_ws(
             // tungstenite returns `Error::Http(response)` when the server
             // sends a non-101 HTTP response.  Extract the status code from
             // the structured error rather than doing fragile string matching.
-            use tungstenite::Error as WsError;
             if let WsError::Http(ref resp) = e {
                 let status = resp.status().as_u16();
                 if matches!(status, 301 | 302 | 303 | 307 | 308) {
                     return WsConnectResult::Redirect(status);
                 }
+
                 WsConnectResult::Failed(format!("HTTP {} from server", status))
             } else {
                 WsConnectResult::Failed(e.to_string())
@@ -169,27 +165,47 @@ pub async fn connect_ws_for_dc(
     let mut all_redirects = true;
 
     for domain in &domains {
-        debug!("WS trying DC{}{} → {} via {}", dc, if is_media { "m" } else { "" }, domain, ip);
+        debug!(
+            "WS trying DC{}{} → {} via {}",
+            dc,
+            if is_media { "m" } else { "" },
+            domain,
+            ip
+        );
+
         match connect_ws(ip, domain, skip_tls_verify, timeout).await {
             WsConnectResult::Connected(ws) => {
                 return (Some(ws), false);
             }
             WsConnectResult::Redirect(code) => {
-                warn!("WS DC{}{} got {} from {} (redirect)", dc, if is_media { "m" } else { "" }, code, domain);
+                warn!(
+                    "WS DC{}{} got {} from {} (redirect)",
+                    dc,
+                    if is_media { "m" } else { "" },
+                    code,
+                    domain
+                );
                 // Keep trying next domain; still counts as all_redirects.
             }
             WsConnectResult::Failed(reason) => {
-                warn!("WS DC{}{} failed on {}: {}", dc, if is_media { "m" } else { "" }, domain, reason);
+                warn!(
+                    "WS DC{}{} failed on {}: {}",
+                    dc,
+                    if is_media { "m" } else { "" },
+                    domain,
+                    reason
+                );
+
                 all_redirects = false; // a real failure, not just a redirect
             }
         }
     }
+
     (None, all_redirects)
 }
 
 /// Send a binary WebSocket message and flush.
 pub async fn ws_send(ws: &mut TgWsStream, data: Vec<u8>) -> Result<(), String> {
-    use tungstenite::Message;
     ws.send(Message::Binary(data))
         .await
         .map_err(|e| e.to_string())
@@ -199,7 +215,6 @@ pub async fn ws_send(ws: &mut TgWsStream, data: Vec<u8>) -> Result<(), String> {
 /// Returns `None` when the connection is closed gracefully.
 #[allow(dead_code)]
 pub async fn ws_recv(ws: &mut TgWsStream) -> Option<Vec<u8>> {
-    use tungstenite::Message;
     loop {
         match ws.next().await {
             Some(Ok(Message::Binary(b))) => return Some(b),
@@ -245,6 +260,7 @@ fn build_no_verify_connector() -> Connector {
 fn webpki_roots_store() -> rustls::RootCertStore {
     let mut store = rustls::RootCertStore::empty();
     store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+
     store
 }
 

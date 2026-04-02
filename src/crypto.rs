@@ -103,7 +103,8 @@ pub fn parse_handshake(handshake: &[u8; HANDSHAKE_LEN], secret: &[u8]) -> Option
     let dc_id = dc_idx.unsigned_abs() as u32;
     let is_media = dc_idx < 0;
 
-    let prekey_and_iv: [u8; PREKEY_LEN + IV_LEN] = handshake[SKIP_LEN..SKIP_LEN + PREKEY_LEN + IV_LEN]
+    let prekey_and_iv: [u8; PREKEY_LEN + IV_LEN] = handshake
+        [SKIP_LEN..SKIP_LEN + PREKEY_LEN + IV_LEN]
         .try_into()
         .unwrap();
 
@@ -150,9 +151,11 @@ pub fn generate_relay_init(proto: ProtoTag, dc_idx: i16) -> [u8; HANDSHAKE_LEN] 
         if RESERVED_FIRST_BYTES.contains(&rnd[0]) {
             continue;
         }
+        
         if RESERVED_STARTS.iter().any(|s| &rnd[..4] == s) {
             continue;
         }
+
         if rnd[4..8] == RESERVED_CONTINUE {
             continue;
         }

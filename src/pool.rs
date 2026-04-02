@@ -103,6 +103,7 @@ impl WsPool {
                 );
                 continue;
             }
+
             let remaining = bucket.len();
             drop(lock);
 
@@ -124,10 +125,12 @@ impl WsPool {
 
         // Bucket is empty (or fully stale).
         drop(lock);
+
         let pool = Arc::clone(self);
         tokio::spawn(async move {
             pool.refill(dc, is_media, target_ip, skip_tls_verify).await;
         });
+
         None
     }
 
@@ -139,10 +142,10 @@ impl WsPool {
 
         for (dc, ip) in dc_redirects {
             for is_media in [false, true] {
-                let new_conns =
-                    Self::connect_batch(&ip, dc, is_media, skip_tls, pool_size).await;
+                let new_conns = Self::connect_batch(&ip, dc, is_media, skip_tls, pool_size).await;
                 let mut lock = self.idle.lock().await;
                 let bucket = lock.entry((dc, is_media)).or_default();
+
                 for ws in new_conns {
                     bucket.push(PoolEntry {
                         ws,
@@ -151,6 +154,7 @@ impl WsPool {
                 }
             }
         }
+
         debug!("WS pool warmup complete");
     }
 
@@ -165,16 +169,22 @@ impl WsPool {
         if !registered {
             return; // another refill is already in progress for this key
         }
+
         // The guard removes the key from `refilling` when it goes out of scope,
         // covering all exit paths (normal return, early return, or panic).
-        let _guard = RefillGuard { set: &self.refilling, key: (dc, is_media) };
+        let _guard = RefillGuard {
+            set: &self.refilling,
+            key: (dc, is_media),
+        };
 
         let needed = {
             let lock = self.idle.lock().await;
+
             let current = lock.get(&(dc, is_media)).map_or(0, |b| b.len());
             if current >= self.pool_size {
                 return;
             }
+
             self.pool_size - current
         };
 
@@ -182,6 +192,7 @@ impl WsPool {
         if !new_conns.is_empty() {
             let mut lock = self.idle.lock().await;
             let bucket = lock.entry((dc, is_media)).or_default();
+
             // Re-check available space; another path (e.g. warmup) may have
             // filled the bucket while we were connecting.  Drop any surplus
             // connections so their FDs are closed immediately.
@@ -192,6 +203,7 @@ impl WsPool {
                     created: Instant::now(),
                 });
             }
+
             debug!(
                 "pool refilled DC{}{}: {} ready",
                 dc,
@@ -216,7 +228,12 @@ impl WsPool {
             match connect_ws_for_dc(ip, dc, is_media, skip_tls, timeout).await {
                 (Some(ws), _) => results.push(ws),
                 (None, _) => {
-                    warn!("pool: failed to pre-connect DC{}{}", dc, if is_media { "m" } else { "" });
+                    warn!(
+                        "pool: failed to pre-connect DC{}{}",
+                        dc,
+                        if is_media { "m" } else { "" }
+                    );
+
                     break;
                 }
             }

@@ -5,6 +5,7 @@
 //! That makes Docker / systemd deployments trivial without a config file.
 
 use std::collections::HashMap;
+use std::net::UdpSocket;
 
 use clap::Parser;
 
@@ -38,13 +39,16 @@ fn parse_dc_ip(s: &str) -> Result<(u32, String), String> {
     let (dc_s, ip_s) = s
         .split_once(':')
         .ok_or_else(|| format!("expected DC:IP, got {s:?}"))?;
+
     let dc: u32 = dc_s
         .parse()
         .map_err(|_| format!("invalid DC number {dc_s:?}"))?;
+
     // Validate the IP address string.
     let _: std::net::IpAddr = ip_s
         .parse()
         .map_err(|_| format!("invalid IP address {ip_s:?}"))?;
+
     Ok((dc, ip_s.to_string()))
 }
 
@@ -161,17 +165,16 @@ impl Config {
         if let Some(ref ip) = self.link_ip {
             return ip.clone();
         }
+
         // Auto-detect when the bind address is not directly reachable by
         // remote clients (wildcard or loopback).
-        let bind_is_local = matches!(
-            self.host.as_str(),
-            "0.0.0.0" | "::" | "127.0.0.1" | "::1"
-        );
+        let bind_is_local = matches!(self.host.as_str(), "0.0.0.0" | "::" | "127.0.0.1" | "::1");
         if bind_is_local {
             if let Some(lan_ip) = detect_lan_ip() {
                 return lan_ip;
             }
         }
+
         self.host.clone()
     }
 
@@ -192,19 +195,21 @@ impl Config {
 /// packet is actually sent); the OS routing table then fills in the local
 /// source address.
 fn detect_lan_ip() -> Option<String> {
-    use std::net::UdpSocket;
     // 8.8.8.8:80 is Google's public DNS. No packet is actually sent — we just
     // need any well-known routable address so the kernel can select the right
     // source interface for us via the routing table.
     let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
     socket.connect("8.8.8.8:80").ok()?;
+
     let local_addr = socket.local_addr().ok()?;
     let ip = local_addr.ip();
+
     // Only return a usable unicast IPv4 address.
     if let std::net::IpAddr::V4(v4) = ip {
         if !v4.is_loopback() && !v4.is_link_local() && !v4.is_unspecified() {
             return Some(v4.to_string());
         }
     }
+
     None
 }

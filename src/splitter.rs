@@ -41,9 +41,12 @@ impl MsgSplitter {
         let relay_enc_key = &relay_init[SKIP_LEN..SKIP_LEN + PREKEY_LEN];
         let relay_enc_iv = &relay_init[SKIP_LEN + PREKEY_LEN..SKIP_LEN + PREKEY_LEN + IV_LEN];
         let mut dec = make_cipher(relay_enc_key, relay_enc_iv);
+
         // Advance past the relay init (same fast-forward as tg_enc).
         let mut dummy = [0u8; HANDSHAKE_LEN];
+
         dec.apply_keystream(&mut dummy);
+
         Self {
             dec,
             proto,
@@ -82,18 +85,22 @@ impl MsgSplitter {
                     // Unsupported / unknown protocol variant — disable parsing
                     // and flush everything buffered so far.
                     parts.push(self.cipher_buf.clone());
+
                     self.cipher_buf.clear();
                     self.plain_buf.clear();
                     self.disabled = true;
+
                     break;
                 }
                 Some(len) => {
                     parts.push(self.cipher_buf[..len].to_vec());
+
                     self.cipher_buf.drain(..len);
                     self.plain_buf.drain(..len);
                 }
             }
         }
+
         parts
     }
 
@@ -102,9 +109,12 @@ impl MsgSplitter {
         if self.cipher_buf.is_empty() {
             return Vec::new();
         }
+
         let tail = self.cipher_buf.clone();
+
         self.cipher_buf.clear();
         self.plain_buf.clear();
+
         vec![tail]
     }
 
@@ -116,6 +126,7 @@ impl MsgSplitter {
         if self.plain_buf.is_empty() {
             return None;
         }
+
         match self.proto {
             ProtoTag::Abridged => self.abridged_len(),
             ProtoTag::Intermediate | ProtoTag::PaddedIntermediate => self.intermediate_len(),
@@ -132,13 +143,11 @@ impl MsgSplitter {
             if self.plain_buf.len() < 4 {
                 return None; // need more data for 4-byte header
             }
-            let l = u32::from_le_bytes([
-                self.plain_buf[1],
-                self.plain_buf[2],
-                self.plain_buf[3],
-                0,
-            ]) as usize
+
+            let l = u32::from_le_bytes([self.plain_buf[1], self.plain_buf[2], self.plain_buf[3], 0])
+                as usize
                 * 4;
+
             (l, 4)
         } else {
             ((first & 0x7F) as usize * 4, 1)
@@ -147,6 +156,7 @@ impl MsgSplitter {
         if payload_len == 0 {
             return Some(0); // signal to disable splitter
         }
+
         let total = header_len + payload_len;
         if self.plain_buf.len() < total {
             None
@@ -162,6 +172,7 @@ impl MsgSplitter {
         if self.plain_buf.len() < 4 {
             return None;
         }
+
         let payload_len = (u32::from_le_bytes([
             self.plain_buf[0],
             self.plain_buf[1],
@@ -172,6 +183,7 @@ impl MsgSplitter {
         if payload_len == 0 {
             return Some(0);
         }
+
         let total = 4 + payload_len;
         if self.plain_buf.len() < total {
             None

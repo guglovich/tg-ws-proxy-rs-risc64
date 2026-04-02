@@ -63,7 +63,9 @@ fn auto_max_connections(fd_limit: usize, pool_size: usize, dc_buckets: usize) ->
         // Unlimited FDs: cap at a large but sane value.
         return 512;
     }
+
     let reserved = 1 + pool_size * dc_buckets * 2 + 32;
+
     (fd_limit.saturating_sub(reserved) / 2).max(4)
 }
 
@@ -93,6 +95,7 @@ async fn main() {
     } else {
         "info"
     };
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -153,13 +156,19 @@ async fn main() {
     for (dc, ip) in &dcs {
         info!("    DC{}: {}", dc, ip);
     }
+
     if config.skip_tls_verify {
         info!("  ⚠  TLS certificate verification DISABLED");
     }
-    info!("  Max connections: {} (fd-limit: {})", max_connections, fd_limit);
+
+    info!(
+        "  Max connections: {} (fd-limit: {})",
+        max_connections, fd_limit
+    );
     info!("{}", "=".repeat(60));
     info!("  Telegram proxy link (use this on all devices):");
     info!("    {}", tg_link);
+
     if link_host != config.host {
         info!(
             "  ℹ  Link uses auto-detected IP {}. \

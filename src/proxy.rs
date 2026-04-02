@@ -19,8 +19,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::crypto::ConnectionCiphers;
 use cipher::StreamCipher;
 use futures_util::SinkExt;
+use futures_util::StreamExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tracing::{debug, info, warn};
@@ -79,13 +81,19 @@ fn ws_timeout_for(dc: u32, is_media: bool) -> Duration {
             }
         }
     }
+
     WS_NORMAL_TIMEOUT
 }
 
 // ─── Client handler ──────────────────────────────────────────────────────────
 
 /// Handle one inbound client connection end-to-end.
-pub async fn handle_client(stream: TcpStream, peer: std::net::SocketAddr, config: Config, pool: Arc<WsPool>) {
+pub async fn handle_client(
+    stream: TcpStream,
+    peer: std::net::SocketAddr,
+    config: Config,
+    pool: Arc<WsPool>,
+) {
     let label = peer.to_string();
     let _ = stream.set_nodelay(true);
 
@@ -121,9 +129,14 @@ pub async fn handle_client(stream: TcpStream, peer: std::net::SocketAddr, config
     let info = match parse_handshake(&handshake_buf, &secret) {
         Some(i) => i,
         None => {
-            debug!("[{}] bad handshake (wrong secret or reserved prefix)", label);
+            debug!(
+                "[{}] bad handshake (wrong secret or reserved prefix)",
+                label
+            );
+
             // Drain the connection silently to avoid giving information to scanners.
             let _ = tokio::io::copy(&mut reader, &mut tokio::io::sink()).await;
+
             return;
         }
     };
@@ -131,13 +144,21 @@ pub async fn handle_client(stream: TcpStream, peer: std::net::SocketAddr, config
     let dc_id = info.dc_id;
     let is_media = info.is_media;
     let proto = info.proto;
+
     // Apply DC override (e.g. DC 203 → DC 2 for WS domain selection).
     let ws_dc = *dc_overrides.get(&dc_id).unwrap_or(&dc_id);
-    let dc_idx: i16 = if is_media { -(dc_id as i16) } else { dc_id as i16 };
+    let dc_idx: i16 = if is_media {
+        -(dc_id as i16)
+    } else {
+        dc_id as i16
+    };
 
     debug!(
         "[{}] handshake ok: DC{}{} proto={:?}",
-        label, dc_id, if is_media { " media" } else { "" }, proto
+        label,
+        dc_id,
+        if is_media { " media" } else { "" },
+        proto
     );
 
     // ── Step 3: generate the relay init packet for the Telegram backend ──
@@ -160,11 +181,21 @@ pub async fn handle_client(stream: TcpStream, peer: std::net::SocketAddr, config
                 return;
             }
         };
+
         info!("[{}] {} → TCP fallback {}:443", label, reason, fallback);
+
         bridge_tcp(
-            &label, reader, writer, &fallback, &relay_init, ciphers, dc_id, is_media,
+            &label,
+            reader,
+            writer,
+            &fallback,
+            &relay_init,
+            ciphers,
+            dc_id,
+            is_media,
         )
         .await;
+
         return;
     }
 
@@ -172,12 +203,14 @@ pub async fn handle_client(stream: TcpStream, peer: std::net::SocketAddr, config
     let ws_timeout = ws_timeout_for(dc_id, is_media);
 
     // ── Step 6a: try pool first ───────────────────────────────────────────
-    let ws_opt = pool
-        .get(dc_id, is_media, target_ip.clone(), skip_tls)
-        .await;
+    let ws_opt = pool.get(dc_id, is_media, target_ip.clone(), skip_tls).await;
 
     let ws = if let Some(ws) = ws_opt {
-        info!("[{}] DC{}{} → pool hit via {}", label, dc_id, media_tag, target_ip);
+        info!(
+            "[{}] DC{}{} → pool hit via {}",
+            label, dc_id, media_tag, target_ip
+        );
+
         ws
     } else {
         // ── Step 6b: fresh WebSocket connect ─────────────────────────────
@@ -187,26 +220,34 @@ pub async fn handle_client(stream: TcpStream, peer: std::net::SocketAddr, config
         match ws_opt {
             Some(ws) => {
                 clear_dc_cooldown(dc_id, is_media);
+
                 info!(
                     "[{}] DC{}{} → WS connected via {}",
                     label, dc_id, media_tag, target_ip
                 );
+
                 ws
             }
             None => {
                 // WS failed — apply cooldown and fall back to TCP.
                 if all_redirects {
                     blacklist_ws(dc_id, is_media);
+
                     warn!(
                         "[{}] DC{}{} WS cooldown {}s (all domains returned redirect)",
-                        label, dc_id, media_tag,
+                        label,
+                        dc_id,
+                        media_tag,
                         WS_REDIRECT_COOLDOWN.as_secs()
                     );
                 } else {
                     set_dc_cooldown(dc_id, is_media);
+
                     info!(
                         "[{}] DC{}{} WS cooldown {}s",
-                        label, dc_id, media_tag,
+                        label,
+                        dc_id,
+                        media_tag,
                         WS_FAIL_COOLDOWN.as_secs()
                     );
                 }
@@ -215,18 +256,34 @@ pub async fn handle_client(stream: TcpStream, peer: std::net::SocketAddr, config
                     .get(&dc_id)
                     .cloned()
                     .unwrap_or(target_ip.clone());
-                info!("[{}] DC{}{} → TCP fallback {}:443", label, dc_id, media_tag, fallback);
+
+                info!(
+                    "[{}] DC{}{} → TCP fallback {}:443",
+                    label, dc_id, media_tag, fallback
+                );
+
                 bridge_tcp(
-                    &label, reader, writer, &fallback, &relay_init, ciphers, dc_id, is_media,
+                    &label,
+                    reader,
+                    writer,
+                    &fallback,
+                    &relay_init,
+                    ciphers,
+                    dc_id,
+                    is_media,
                 )
                 .await;
+
                 return;
             }
         }
     };
 
     // ── Step 7: bidirectional WebSocket bridge ───────────────────────────
-    bridge_ws(&label, reader, writer, ws, relay_init, ciphers, proto, dc_id, is_media).await;
+    bridge_ws(
+        &label, reader, writer, ws, relay_init, ciphers, proto, dc_id, is_media,
+    )
+    .await;
 }
 
 // ─── WebSocket bridge ────────────────────────────────────────────────────────
@@ -249,19 +306,21 @@ async fn bridge_ws(
     dc: u32,
     is_media: bool,
 ) {
-    use crate::crypto::ConnectionCiphers;
-
     // Send the relay init packet to Telegram before bridging.
     if let Err(e) = ws_send(&mut ws, relay_init.to_vec()).await {
         warn!("[{}] failed to send relay init: {}", label, e);
         return;
     }
 
-    let ConnectionCiphers { mut clt_dec, mut clt_enc, mut tg_enc, mut tg_dec } = ciphers;
+    let ConnectionCiphers {
+        mut clt_dec,
+        mut clt_enc,
+        mut tg_enc,
+        mut tg_dec,
+    } = ciphers;
     let splitter = MsgSplitter::new(&relay_init, proto);
 
     // Split the WebSocket stream into sink (send) and source (recv).
-    use futures_util::StreamExt;
     let (mut ws_sink, mut ws_source) = ws.split();
 
     let start = std::time::Instant::now();
@@ -275,19 +334,23 @@ async fn bridge_ws(
 
     let mut upload = tokio::spawn({
         let mut splitter = splitter;
+
         async move {
             let mut reader = reader;
             let mut buf = vec![0u8; 65536];
             let mut total = 0u64;
+
             loop {
                 let n = match reader.read(&mut buf).await {
                     Ok(0) | Err(_) => break,
                     Ok(n) => n,
                 };
                 let chunk = &mut buf[..n];
+
                 // Decrypt from client, then re-encrypt for Telegram.
                 clt_dec.apply_keystream(chunk);
                 tg_enc.apply_keystream(chunk);
+
                 // Split into MTProto packets and send as separate WS frames.
                 let parts = splitter.split(chunk);
                 for part in parts {
@@ -295,12 +358,15 @@ async fn bridge_ws(
                         return total;
                     }
                 }
+
                 total += n as u64;
             }
+
             // Flush any partial last packet.
             for part in splitter.flush() {
                 let _ = ws_sink.send(Message::Binary(part)).await;
             }
+
             // Close the WS sink so Telegram knows we are done and the
             // download direction (ws_source) receives the close frame and
             // terminates promptly instead of waiting indefinitely.
@@ -312,6 +378,7 @@ async fn bridge_ws(
     let mut download = tokio::spawn(async move {
         let mut writer = writer;
         let mut total = 0u64;
+
         loop {
             // Use the source half of the split WS stream.
             let data = match ws_source.next().await {
@@ -321,14 +388,18 @@ async fn bridge_ws(
                 _ => break,
             };
             let mut data = data;
+
             // Decrypt from Telegram, then re-encrypt for client.
             tg_dec.apply_keystream(&mut data);
             clt_enc.apply_keystream(&mut data);
+
             if writer.write_all(&data).await.is_err() {
                 break;
             }
+
             total += data.len() as u64;
         }
+
         total
     });
 
@@ -338,22 +409,31 @@ async fn bridge_ws(
         result = &mut upload => {
             let up = result.unwrap_or_else(|_| 0);
             download.abort();
+
             let down = download.await.unwrap_or_else(|_| 0);
+
             (up, down)
         }
         result = &mut download => {
             let down = result.unwrap_or_else(|_| 0);
             upload.abort();
+
             let up = upload.await.unwrap_or_else(|_| 0);
+
             (up, down)
         }
     };
 
     let elapsed = start.elapsed().as_secs_f32();
+
     info!(
         "[{}] DC{}{} WS session closed: ↑{}  ↓{}  {:.1}s",
-        label, dc, if is_media { "m" } else { "" },
-        human_bytes(bytes_up), human_bytes(bytes_down), elapsed
+        label,
+        dc,
+        if is_media { "m" } else { "" },
+        human_bytes(bytes_up),
+        human_bytes(bytes_down),
+        elapsed
     );
 }
 
@@ -388,6 +468,7 @@ async fn bridge_tcp(
             return;
         }
     };
+
     let _ = remote.set_nodelay(true);
     let (mut rem_reader, mut rem_writer) = tokio::io::split(remote);
 
@@ -397,43 +478,57 @@ async fn bridge_tcp(
         return;
     }
 
-    let crate::crypto::ConnectionCiphers { mut clt_dec, mut clt_enc, mut tg_enc, mut tg_dec } = ciphers;
+    let crate::crypto::ConnectionCiphers {
+        mut clt_dec,
+        mut clt_enc,
+        mut tg_enc,
+        mut tg_dec,
+    } = ciphers;
 
     let start = std::time::Instant::now();
 
     let mut upload = tokio::spawn(async move {
         let mut buf = vec![0u8; 65536];
         let mut total = 0u64;
+
         loop {
             let n = match reader.read(&mut buf).await {
                 Ok(0) | Err(_) => break,
                 Ok(n) => n,
             };
             let chunk = &mut buf[..n];
+
             clt_dec.apply_keystream(chunk);
             tg_enc.apply_keystream(chunk);
+
             if rem_writer.write_all(chunk).await.is_err() {
                 break;
             }
+
             total += n as u64;
         }
+
         total
     });
 
     let mut download = tokio::spawn(async move {
         let mut buf = vec![0u8; 65536];
         let mut total = 0u64;
+
         loop {
             let n = match rem_reader.read(&mut buf).await {
                 Ok(0) | Err(_) => break,
                 Ok(n) => n,
             };
             let chunk = &mut buf[..n];
+
             tg_dec.apply_keystream(chunk);
             clt_enc.apply_keystream(chunk);
+
             if writer.write_all(chunk).await.is_err() {
                 break;
             }
+
             total += n as u64;
         }
         total
@@ -445,22 +540,31 @@ async fn bridge_tcp(
         result = &mut upload => {
             let up = result.unwrap_or_else(|_| 0);
             download.abort();
+
             let down = download.await.unwrap_or_else(|_| 0);
+
             (up, down)
         }
         result = &mut download => {
             let down = result.unwrap_or_else(|_| 0);
             upload.abort();
+
             let up = upload.await.unwrap_or_else(|_| 0);
+
             (up, down)
         }
     };
 
     let elapsed = start.elapsed().as_secs_f32();
+
     info!(
         "[{}] DC{}{} TCP session closed: ↑{}  ↓{}  {:.1}s",
-        label, dc, if is_media { "m" } else { "" },
-        human_bytes(bytes_up), human_bytes(bytes_down), elapsed
+        label,
+        dc,
+        if is_media { "m" } else { "" },
+        human_bytes(bytes_up),
+        human_bytes(bytes_down),
+        elapsed
     );
 }
 
@@ -468,6 +572,7 @@ async fn bridge_tcp(
 
 fn human_bytes(n: u64) -> String {
     const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB"];
+
     let mut v = n as f64;
     for unit in UNITS {
         if v < 1024.0 {
@@ -475,5 +580,6 @@ fn human_bytes(n: u64) -> String {
         }
         v /= 1024.0;
     }
+
     format!("{:.1}PB", v)
 }
