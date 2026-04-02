@@ -103,6 +103,11 @@ pub struct Config {
     /// **Do not use on untrusted networks unless you understand the risks.**
     #[arg(long = "danger-accept-invalid-certs", env = "TG_SKIP_TLS_VERIFY")]
     pub skip_tls_verify: bool,
+
+    /// Suppress all log output (useful on routers / embedded devices).
+    /// Overrides `--verbose` when both are set.
+    #[arg(short = 'q', long, env = "TG_QUIET")]
+    pub quiet: bool,
 }
 
 impl Config {

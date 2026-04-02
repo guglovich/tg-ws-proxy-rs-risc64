@@ -45,6 +45,43 @@ cargo build --release --target x86_64-unknown-linux-musl
 The release binary is at `target/release/tg-ws-proxy` (or
 `target/<target>/release/tg-ws-proxy` for cross-compiled targets).
 
+## Cross-platform builds with `cargo-zigbuild`
+
+[`cargo-zigbuild`](https://github.com/rust-cross/cargo-zigbuild) uses the Zig
+compiler as a drop-in C cross-linker so you can build for every platform from
+a single Linux or macOS host without installing any platform SDKs.
+
+```bash
+# Install cargo-zigbuild and Zig
+pip install ziglang        # or: brew install zig
+cargo install cargo-zigbuild
+
+# Add all required Rust targets in one shot
+rustup target add \
+  x86_64-unknown-linux-musl \
+  aarch64-unknown-linux-musl \
+  armv7-unknown-linux-musleabihf \
+  mipsel-unknown-linux-musl \
+  x86_64-apple-darwin \
+  aarch64-apple-darwin \
+  x86_64-pc-windows-gnu
+
+# Build for all platforms
+cargo zigbuild --release --target x86_64-unknown-linux-musl       # Linux x86-64 (musl static)
+cargo zigbuild --release --target aarch64-unknown-linux-musl      # Linux / OpenWrt ARM64
+cargo zigbuild --release --target armv7-unknown-linux-musleabihf  # OpenWrt ARMv7
+cargo zigbuild --release --target mipsel-unknown-linux-musl       # OpenWrt MIPS LE
+cargo zigbuild --release --target x86_64-apple-darwin             # macOS Intel
+cargo zigbuild --release --target aarch64-apple-darwin            # macOS Apple Silicon
+cargo zigbuild --release --target x86_64-pc-windows-gnu           # Windows x86-64
+```
+
+> **Note:** Building macOS targets (`*-apple-darwin`) requires the macOS SDK
+> (XCode Command Line Tools). On Linux you can use
+> [`osxcross`](https://github.com/tpoechtrager/osxcross) to supply the SDK
+> and then set `SDKROOT` / `MACOSX_DEPLOYMENT_TARGET` appropriately before
+> running `cargo zigbuild`.
+
 ## Usage
 
 ```
@@ -59,11 +96,12 @@ tg-ws-proxy [OPTIONS]
 | `--dc-ip <DC:IP>` | DC2 + DC4 | Target IP per DC (repeatable) |
 | `--buf-kb <KB>` | `256` | Socket buffer size |
 | `--pool-size <N>` | `4` | Pre-warmed WS connections per DC |
+| `-q / --quiet` | off | Suppress all log output |
 | `-v / --verbose` | off | Debug logging |
 | `--danger-accept-invalid-certs` | off | Skip TLS verification |
 
 Every flag has a matching environment variable (`TG_PORT`, `TG_HOST`,
-`TG_SECRET`, `TG_BUF_KB`, `TG_POOL_SIZE`, `TG_VERBOSE`, `TG_SKIP_TLS_VERIFY`).
+`TG_SECRET`, `TG_BUF_KB`, `TG_POOL_SIZE`, `TG_QUIET`, `TG_VERBOSE`, `TG_SKIP_TLS_VERIFY`).
 
 ### Examples
 
@@ -210,6 +248,7 @@ TG_PORT=1443
 TG_SECRET=0123456789abcdef0123456789abcdef
 TG_POOL_SIZE=4
 TG_BUF_KB=256
+TG_QUIET=true
 TG_VERBOSE=false
 ```
 

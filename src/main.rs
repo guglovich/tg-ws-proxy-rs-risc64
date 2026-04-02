@@ -86,7 +86,13 @@ async fn main() {
     let config = Config::from_args();
 
     // ── Logging ──────────────────────────────────────────────────────────
-    let log_level = if config.verbose { "debug" } else { "info" };
+    let log_level = if config.quiet {
+        "off"
+    } else if config.verbose {
+        "debug"
+    } else {
+        "info"
+    };
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
