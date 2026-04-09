@@ -92,15 +92,19 @@ jobs:
                   repository: valnesfjord/tg-ws-proxy-rs
                   ref: ${{ github.event.inputs.version }}
 
-            - uses: dtolnay/rust-toolchain@nightly
+            - uses: dtolnay/rust-toolchain@stable
               with:
-                  components: rust-src
+                  targets: riscv64gc-unknown-linux-musl
 
-            - name: Install cross
-              run: cargo install cross --locked
+            - name: Install Zig and cargo-zigbuild
+              run: |
+                  curl -L https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz | tar -xJ
+                  sudo mv zig-linux-x86_64-0.13.0 /usr/local/zig
+                  echo "/usr/local/zig" >> $GITHUB_PATH
+                  pip install cargo-zigbuild
 
             - name: Build for riscv64
-              run: cross +nightly build --release --bin tg-ws-proxy --target riscv64gc-unknown-linux-musl -Z build-std=std,panic_abort
+              run: cargo zigbuild --release --target riscv64gc-unknown-linux-musl
 
             - name: Create release
               env:
