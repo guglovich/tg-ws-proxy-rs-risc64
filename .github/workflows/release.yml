@@ -109,9 +109,11 @@ jobs:
             - name: Create release
               env:
                   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  REPO: guglovich/tg-ws-proxy-rs-risc64
               run: |
                   TAG="${{ github.event.inputs.version }}"
-                  gh release create "$TAG" --generate-notes || true
+                  gh release create "$TAG" --repo "$REPO" --generate-notes || true
                   gh release upload "$TAG" \
-                    "target/riscv64gc-unknown-linux-musl/release/tg-ws-proxy#tg-ws-proxy-riscv64gc-unknown-linux-musl" \
+                    "target/riscv64gc-unknown-linux-musl/release/tg-ws-proxy#tg-ws-proxy-openwrt-riscv64" \
+                    --repo "$REPO" \
                     --clobber
