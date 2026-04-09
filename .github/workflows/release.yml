@@ -39,6 +39,8 @@ jobs:
                       os: windows-latest
                     - target: universal-apple-darwin
                       os: macos-latest
+                    - target: riscv64gc-unknown-linux-musl
+                      os: ubuntu-latest
         runs-on: ${{ matrix.os }}
         steps:
             - uses: actions/checkout@v6
@@ -75,4 +77,29 @@ jobs:
                   TAG="${GITHUB_REF_NAME}"
                   gh release upload "$TAG" \
                     "target/mipsel-unknown-linux-musl/release/tg-ws-proxy#tg-ws-proxy-mipsel-unknown-linux-musl" \
+                    --clobber
+
+            # Special path for riscv64: nightly + build-std, then upload via gh cli
+            - name: Install nightly + rust-src (riscv64)
+              if: matrix.target == 'riscv64gc-unknown-linux-musl'
+              uses: dtolnay/rust-toolchain@nightly
+              with:
+                  components: rust-src
+
+            - name: Install cross (riscv64)
+              if: matrix.target == 'riscv64gc-unknown-linux-musl'
+              run: cargo install cross --locked
+
+            - name: Build (riscv64, build-std)
+              if: matrix.target == 'riscv64gc-unknown-linux-musl'
+              run: cross +nightly build --release --bin tg-ws-proxy --target riscv64gc-unknown-linux-musl -Z build-std=std,panic_abort
+
+            - name: Upload to GitHub Release (riscv64)
+              if: matrix.target == 'riscv64gc-unknown-linux-musl'
+              env:
+                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              run: |
+                  TAG="${GITHUB_REF_NAME}"
+                  gh release upload "$TAG" \
+                    "target/riscv64gc-unknown-linux-musl/release/tg-ws-proxy#tg-ws-proxy-riscv64gc-unknown-linux-musl" \
                     --clobber
