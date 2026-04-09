@@ -7,9 +7,16 @@ on:
     push:
         tags:
             - v[0-9]+.*
+    workflow_dispatch:
+        inputs:
+            version:
+                description: 'Version tag (e.g., v1.0.8)'
+                required: true
+                type: string
 
 jobs:
     create-release:
+        if: github.event_name == 'push'
         runs-on: ubuntu-latest
         steps:
             - uses: actions/checkout@v6
@@ -19,6 +26,7 @@ jobs:
 
     upload-assets:
         needs: create-release
+        if: github.event_name == 'push'
         strategy:
             fail-fast: false
             matrix:
@@ -39,13 +47,10 @@ jobs:
                       os: windows-latest
                     - target: universal-apple-darwin
                       os: macos-latest
-                    - target: riscv64gc-unknown-linux-musl
-                      os: ubuntu-latest
         runs-on: ${{ matrix.os }}
         steps:
             - uses: actions/checkout@v6
 
-            # Default path (all targets except mipsel)
             - name: Build & upload (default)
               if: matrix.target != 'mipsel-unknown-linux-musl'
               uses: taiki-e/upload-rust-binary-action@v1
@@ -54,7 +59,6 @@ jobs:
                   target: ${{ matrix.target }}
                   token: ${{ secrets.GITHUB_TOKEN }}
 
-            # Special path for mipsel: nightly + build-std, then upload via gh cli
             - name: Install nightly + rust-src (mipsel)
               if: matrix.target == 'mipsel-unknown-linux-musl'
               uses: dtolnay/rust-toolchain@nightly
@@ -79,27 +83,31 @@ jobs:
                     "target/mipsel-unknown-linux-musl/release/tg-ws-proxy#tg-ws-proxy-mipsel-unknown-linux-musl" \
                     --clobber
 
-            # Special path for riscv64: nightly + build-std, then upload via gh cli
-            - name: Install nightly + rust-src (riscv64)
-              if: matrix.target == 'riscv64gc-unknown-linux-musl'
-              uses: dtolnay/rust-toolchain@nightly
+    build-riscv64:
+        if: github.event_name == 'workflow_dispatch'
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v6
+              with:
+                  repository: valnesfjord/tg-ws-proxy-rs
+                  ref: ${{ github.event.inputs.version }}
+
+            - uses: dtolnay/rust-toolchain@nightly
               with:
                   components: rust-src
 
-            - name: Install cross (riscv64)
-              if: matrix.target == 'riscv64gc-unknown-linux-musl'
+            - name: Install cross
               run: cargo install cross --locked
 
-            - name: Build (riscv64, build-std)
-              if: matrix.target == 'riscv64gc-unknown-linux-musl'
+            - name: Build for riscv64
               run: cross +nightly build --release --bin tg-ws-proxy --target riscv64gc-unknown-linux-musl -Z build-std=std,panic_abort
 
-            - name: Upload to GitHub Release (riscv64)
-              if: matrix.target == 'riscv64gc-unknown-linux-musl'
+            - name: Create release
               env:
                   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
               run: |
-                  TAG="${GITHUB_REF_NAME}"
+                  TAG="${{ github.event.inputs.version }}"
+                  gh release create "$TAG" --generate-notes || true
                   gh release upload "$TAG" \
                     "target/riscv64gc-unknown-linux-musl/release/tg-ws-proxy#tg-ws-proxy-riscv64gc-unknown-linux-musl" \
                     --clobber
