@@ -96,6 +96,11 @@ jobs:
               with:
                   targets: riscv64gc-unknown-linux-musl
 
+            # Upstream pins its own toolchain in rust-toolchain.toml (e.g. 1.98.0),
+            # so install the target for that pinned toolchain as well.
+            - name: Install target for pinned toolchain
+              run: rustup target add riscv64gc-unknown-linux-musl
+
             - name: Install Zig and cargo-zigbuild
               run: |
                   curl -L https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz | tar -xJ
